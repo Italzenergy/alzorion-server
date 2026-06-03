@@ -19,8 +19,8 @@ export const login = async (req, res) => {
     // SameSite: Protege contra ataques CSRF
     const cookieOptions = {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production', 
-      sameSite: 'strict',
+      secure: true,       // ← Siempre true, porque ambos sitios son HTTPS
+      sameSite: 'none',   // ← Permite envío cross‑origin
       //maxAge: 7 * 24 * 60 * 60 * 1000 // 7 días $\times$ 24 horas $\times$ 60 minutos $\times$ 60 segundos $\times$ 1000 milisegundos.
       maxAge: 60 * 60 * 1000 
     };
