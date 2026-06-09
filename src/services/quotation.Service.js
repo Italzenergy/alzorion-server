@@ -1,8 +1,5 @@
 import { supabase } from '../config/supabaseClient.js';
 import nodemailer from 'nodemailer';
-import { Resend } from 'resend';
-
-const resend = new Resend(process.env.RESEND_API_KEY);
 export const quotationService = {
 // 1. Obtener cotizaciones (Con filtro de privacidad por rol REAL)
   getAll: async (user) => {
@@ -183,54 +180,155 @@ export const quotationService = {
     return true;
   },
   sendEmail: async (id, pdfBase64) => {
-  // 1. Buscar la cotización
-  const quote = await quotationService.getById(id);
-  if (!quote.clients?.email) {
-    throw new Error("El cliente no tiene un correo electrónico registrado.");
-  }
+    // 1. Buscamos la cotización para obtener el correo del cliente
+    const quote = await quotationService.getById(id);
+    
+    if (!quote.clients?.email) {
+      throw new Error("El cliente no tiene un correo electrónico registrado.");
+    }
 
-  // 2. Limpiar el base64
-  const base64Data = pdfBase64.replace(/^data:application\/pdf;.*?base64,/, "");
+    // 2. Configuramos el "Cartero" usando tus variables SMTP del .env
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      secure: process.env.SMTP_PORT == 465, // true para puerto 465, false para otros como 587
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      }
+    });
 
-  // 3. Construir el asunto y el HTML (puedes reutilizar el mismo que tenías)
-  const isPO = quote.status === 'confirmada';
-  const emailSubject = isPO
-    ? `Confirmación de Orden ${quote.document_number} - ALZ ENERGY`
-    : `Cotización ${quote.document_number} - ALZ ENERGY`;
+    // 3. Limpiamos el Base64 (html2pdf a veces le pone un encabezado que daña el archivo)
+    const base64Data = pdfBase64.replace(/^data:application\/pdf;filename=[\w.-]+;base64,/, "")
+                                .replace(/^data:application\/pdf;base64,/, "");
 
-  // Aquí va tu HTML dinámico (cópialo tal cual de tu código actual)
-  const htmlContent = `...`; // Puedes extraerlo a una función aparte
+    // ==========================================
+    // EL BALANCEADOR (¿Es SO o PO?)
+    // ==========================================
+    const isPO = quote.status === 'confirmada';
+    
+    const emailSubject = isPO 
+      ? `Confirmación de Orden ${quote.document_number} - ALZ ENERGY` 
+      : `Cotización ${quote.document_number} - ALZ ENERGY`;
 
-  // 4. Enviar con Resend
-  const { data, error } = await resend.emails.send({
-    from: 'ALZ ENERGY <noreply@alzenergy.com.co>', // O tu dominio verificado si lo configuras
-    to: quote.clients.email,
-    subject: emailSubject,
-    html: htmlContent,
-    attachments: [
-      {
-        filename: `${quote.document_number} - ${quote.clients.name}.pdf`,
-        content: base64Data,
-      },
-    ],
-  });
+    // Texto dinámico según el estado
+    const dynamicBody = isPO 
+      ? `
+        <p style="font-size:14px; line-height:1.6;">
+          De acuerdo a nuestra negociación, nos permitimos confirmar y adjuntar su 
+          <strong style="color:#04ec1f;">Orden de Compra ${quote.document_number}</strong>.
+        </p>
 
-  if (error) {
-    console.error('Error de Resend:', error);
-    throw new Error(error.message);
-  }
+        <div style="background:#f9f9f9; border-left:4px solid #04ec1f; padding:15px; margin:20px 0;">
+          <p style="margin:0; font-size:14px;">
+            <strong>Estado de su pedido:</strong><br/>
+            Venta Confirmada. Su orden ha sido notificada a nuestra bodega para iniciar el proceso de alistamiento y despacho.
+          </p>
+        </div>
 
-  // 5. Actualizar estado si no es PO
-  if (!isPO) {
-    const { error: updateError } = await supabase
-      .from('quotations')
-      .update({ status: 'enviada' })
-      .eq('id', id);
-    if (updateError) throw new Error("Correo enviado, pero falló al actualizar el estado: " + updateError.message);
-  }
+        <p style="font-size:14px; line-height:1.6;">
+          Agradecemos su confianza en ALZ ENERGY. Quedamos a su disposición para cualquier consulta sobre el estado de su entrega.
+        </p>
+      ` 
+      : `
+        <p style="font-size:14px; line-height:1.6;">
+          De acuerdo a su solicitud, nos permitimos adjuntar la cotización 
+          <strong style="color:#04ec1f;">${quote.document_number}</strong>.
+        </p>
 
-  return { success: true, id: data.id };
-},
+        <div style="background:#f9f9f9; border-left:4px solid #04ec1f; padding:15px; margin:20px 0;">
+          <p style="margin:0; font-size:14px;">
+            <strong>Vigencia de la oferta:</strong><br/>
+            ${new Date(quote.valid_until).toLocaleDateString('es-CO')}
+          </p>
+        </div>
+
+        <p style="font-size:14px; line-height:1.6;">
+          Quedamos atentos a cualquier inquietud o comentario para proceder con la confirmación de la orden de compra (PO).
+        </p>
+
+        <!-- CTA -->
+        <div style="text-align:center; margin:30px 0;">
+          <a href="#" 
+             style="background:#04ec1f; color:#000; text-decoration:none; padding:12px 25px; border-radius:6px; font-size:14px; font-weight:bold; display:inline-block;">
+            Confirmar Orden
+          </a>
+        </div>
+      `;
+
+    // 4. Armamos el correo electrónico final
+    const mailOptions = {
+      from: `"ALZ ENERGY" <${process.env.SMTP_USER}>`,
+      to: quote.clients.email,
+      subject: emailSubject,
+      html: `
+        <div style="font-family: 'Montserrat', Arial, sans-serif; background-color:#f4f6f8; padding: 30px 0;">
+          <div style="max-width:600px; margin:0 auto; background:#ffffff; border-radius:10px; overflow:hidden; box-shadow:0 4px 15px rgba(0,0,0,0.08);">
+
+            <!-- Header -->
+            <div style="background: linear-gradient(90deg, #04ec1f, #04ec1f); padding: 20px; text-align:center;">
+              <h1 style="color:#ffffff; margin:0; font-size:22px; letter-spacing:1px;">
+                ALZ ENERGY
+              </h1>
+              <p style="color:#e8f5e9; margin:5px 0 0; font-size:13px;">
+                POTENCIA TU ENERGÍA 
+              </p>
+            </div>
+
+            <!-- Body -->
+            <div style="padding: 30px;">
+              <h2 style="color:#333; margin-top:0;">Hola, ${quote.clients.name}</h2>
+
+              <!-- AQUI INYECTAMOS EL TEXTO BALANCEADO -->
+              ${dynamicBody}
+
+              <p style="font-size:14px; margin-top:30px;">
+                Cordialmente,
+              </p>
+
+              <p style="font-size:14px; margin:0;">
+                <strong>Equipo Comercial</strong><br/>
+                ALZ ENERGY
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="background:#f1f1f1; padding:15px; text-align:center; font-size:12px; color:#777;">
+              <p style="margin:0;">
+                Este correo fue generado automáticamente. Si tiene dudas, responda a este mensaje.<br/>
+                Correo generado ALZ ORION
+              </p>
+            </div>
+
+          </div>
+        </div>
+      `,
+      attachments: [
+        {
+          // Formato dinámico: SO-0001 - Miguel Marulanda.pdf o PO-0001 - Miguel Marulanda.pdf
+          filename: `${quote.document_number} - ${quote.clients.name}.pdf`,
+          content: base64Data,
+          encoding: 'base64'
+        }
+      ]
+    };
+
+    // 5. Enviamos el correo
+    await transporter.sendMail(mailOptions);
+
+    // 6. Actualizamos el estado SOLO si NO está ya confirmada
+    // Así evitamos que una PO se regrese al estado de "enviada" accidentalmente
+    if (!isPO) {
+      const { error } = await supabase
+        .from('quotations')
+        .update({ status: 'enviada' })
+        .eq('id', id);
+
+      if (error) throw new Error("Correo enviado, pero falló al actualizar el estado: " + error.message);
+    }
+
+    return { success: true };
+  },
   // 6. Confirmar Venta (De SO a PO y genera Acta de Bodega)
   confirmSale: async (id, userId) => {
     // A. Buscar la cotización con sus items y cliente
